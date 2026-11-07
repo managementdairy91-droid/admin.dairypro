@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { Search, Calendar, ArrowRight, ClipboardCheck, Clock } from 'lucide-react';
 
-interface SettlementRecord {
+export interface SettlementRecord {
   id: string;
   start_date: string;
   end_date: string;
   total_milk_amount: number;
   total_feed_deduction: number;
+  total_advance_deduction?: number;
   net_payable: number;
   status: string;
   created_at: string;
@@ -44,15 +45,15 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
   });
 
   return (
-    <div className="space-y-8 animate-fade-in">
+    <div className="space-y-8 animate-fade-in font-sans">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 font-sans tracking-tight">
+          <h1 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 tracking-tight">
             Settlement Ledger
           </h1>
-          <p className="text-slate-400 text-sm mt-1 font-sans">
-            Audit approved payouts and view pending billing statements across all suppliers.
+          <p className="text-slate-400 text-sm mt-1">
+            Audit approved payouts and view pending billing statements across all suppliers with feed & advance deductions.
           </p>
         </div>
 
@@ -66,8 +67,8 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
             <button
               key={tab.id}
               onClick={() => setFilterStatus(tab.id as any)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-205 ${
-                filterStatus === tab.id ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 ${
+                filterStatus === tab.id ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
               {tab.label}
@@ -81,13 +82,13 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
         {/* Pending Payout Card */}
         <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-2xl p-6 flex justify-between items-center shadow-lg">
           <div className="space-y-2">
-            <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider font-sans">
+            <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider">
               Unsettled (Pending) Payouts
             </span>
-            <div className="text-2xl font-bold text-white font-sans">
+            <div className="text-2xl font-bold text-white">
               ₹{pendingAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
             </div>
-            <span className="text-[11px] text-slate-500 block font-sans">
+            <span className="text-[11px] text-slate-500 block">
               {pendingCount} suppliers awaiting settlement cycles
             </span>
           </div>
@@ -99,13 +100,13 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
         {/* Completed Paid Card */}
         <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-2xl p-6 flex justify-between items-center shadow-lg">
           <div className="space-y-2">
-            <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider font-sans">
+            <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">
               Completed (Paid) Settlements
             </span>
-            <div className="text-2xl font-bold text-white font-sans">
+            <div className="text-2xl font-bold text-white">
               ₹{completedAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
             </div>
-            <span className="text-[11px] text-slate-500 block font-sans">
+            <span className="text-[11px] text-slate-500 block">
               {completedCount} settlements successfully generated
             </span>
           </div>
@@ -123,7 +124,7 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
           placeholder="Search by supplier name, code, dairy name, or owner..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full bg-slate-900/60 backdrop-blur-md border border-slate-800/80 hover:border-slate-700/80 focus:border-indigo-500 focus:outline-none rounded-2xl pl-12 pr-4 py-3 text-slate-100 placeholder-slate-500 font-sans transition-all duration-200 text-sm"
+          className="w-full bg-slate-900/60 backdrop-blur-md border border-slate-800/80 hover:border-slate-700/80 focus:border-indigo-500 focus:outline-none rounded-2xl pl-12 pr-4 py-3 text-slate-100 placeholder-slate-500 transition-all duration-200 text-sm"
         />
       </div>
 
@@ -131,7 +132,7 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
       {filteredSettlements.length > 0 ? (
         <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-2xl overflow-hidden shadow-xl">
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs font-sans">
+            <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-950/40 text-slate-400 font-semibold uppercase tracking-wider">
                   <th className="px-6 py-4">Settlement Period</th>
@@ -139,6 +140,7 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
                   <th className="px-6 py-4">Dairy (Owner)</th>
                   <th className="px-6 py-4 text-right">Milk Value</th>
                   <th className="px-6 py-4 text-right">Feed Deductions</th>
+                  <th className="px-6 py-4 text-right">Advance Deductions</th>
                   <th className="px-6 py-4 text-right">Net Payout</th>
                   <th className="px-6 py-4 text-center">Status</th>
                 </tr>
@@ -174,6 +176,9 @@ export const SettlementsView: React.FC<SettlementsViewProps> = ({ settlements })
                     </td>
                     <td className="px-6 py-4 text-right text-rose-400 font-medium">
                       -₹{record.total_feed_deduction.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    </td>
+                    <td className="px-6 py-4 text-right text-amber-400 font-medium">
+                      -₹{(record.total_advance_deduction || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                     </td>
                     <td className="px-6 py-4 text-right text-emerald-400 font-bold">
                       ₹{record.net_payable.toLocaleString(undefined, { minimumFractionDigits: 2 })}

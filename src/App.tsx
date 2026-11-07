@@ -5,6 +5,10 @@ import { OwnersView } from './components/OwnersView';
 import { SellersView } from './components/SellersView';
 import { SettlementsView } from './components/SettlementsView';
 import { CattleFeedView } from './components/CattleFeedView';
+import { LeadsView } from './components/LeadsView';
+import { SubscriptionsView } from './components/SubscriptionsView';
+import type { ContactRequest } from './components/LeadsView';
+import type { SubscriptionRequestRecord, SubscriptionPaymentRecord } from './components/SubscriptionsView';
 import { 
   LayoutDashboard, 
   Users, 
@@ -18,10 +22,11 @@ import {
   Loader2, 
   AlertTriangle,
   RefreshCw,
-  Box
+  Box,
+  CreditCard
 } from 'lucide-react';
 
-type ActiveTab = 'dashboard' | 'owners' | 'sellers' | 'settlements' | 'feed';
+type ActiveTab = 'dashboard' | 'owners' | 'subscriptions' | 'sellers' | 'settlements' | 'feed' | 'leads';
 
 interface OwnerProfile {
   id: string;
@@ -35,6 +40,7 @@ interface OwnerProfile {
   snf_rate: number | null;
   is_approved: boolean;
   subscription_status: string;
+  subscription_plan?: string | null;
   subscription_expires_at: string | null;
   created_at: string;
 }
@@ -59,6 +65,7 @@ interface SettlementRecord {
   end_date: string;
   total_milk_amount: number;
   total_feed_deduction: number;
+  total_advance_deduction?: number;
   net_payable: number;
   status: string;
   created_at: string;
@@ -111,10 +118,13 @@ function App() {
 
   // Data state
   const [owners, setOwners] = useState<OwnerProfile[]>([]);
+  const [leads, setLeads] = useState<ContactRequest[]>([]);
   const [sellers, setSellers] = useState<SellerProfile[]>([]);
   const [settlements, setSettlements] = useState<SettlementRecord[]>([]);
   const [feedSales, setFeedSales] = useState<FeedSaleRecord[]>([]);
   const [feedProducts, setFeedProducts] = useState<FeedProductRecord[]>([]);
+  const [subscriptionRequests, setSubscriptionRequests] = useState<SubscriptionRequestRecord[]>([]);
+  const [subscriptionPayments, setSubscriptionPayments] = useState<SubscriptionPaymentRecord[]>([]);
   
   // Stats summary for dashboard
   const [stats, setStats] = useState({
@@ -128,7 +138,9 @@ function App() {
     activeSubscriptions: 0,
     totalFeedBags: 0,
     totalFeedAmount: 0,
-    pendingFeedDeductions: 0
+    pendingFeedDeductions: 0,
+    pendingLeads: 0,
+    pendingSubscriptionRequests: 0,
   });
 
   const [chartsData, setChartsData] = useState<{
@@ -276,6 +288,7 @@ function App() {
         end_date: setl.end_date,
         total_milk_amount: Number(setl.total_milk_amount) || 0,
         total_feed_deduction: Number(setl.total_feed_deduction) || 0,
+        total_advance_deduction: Number(setl.total_advance_deduction) || 0,
         net_payable: Number(setl.net_payable) || 0,
         status: setl.status || 'completed',
         created_at: setl.created_at,
@@ -284,6 +297,18 @@ function App() {
         owner_name: setl.owner?.full_name || 'Central Owner',
         owner_dairy: setl.owner?.dairy_name || 'Central Dairy'
       }));
+
+      // E2. Fetch Unsettled Advances for accurate net settlement deduction
+      let unsettledAdvances: any[] = [];
+      try {
+        const { data: advancesData } = await supabase
+          .from('advances')
+          .select('seller_id, owner_id, amount, is_settled')
+          .eq('is_settled', false);
+        if (advancesData) unsettledAdvances = advancesData;
+      } catch (advErr) {
+        console.warn('Could not load unsettled advances:', advErr);
+      }
 
       // F. Fetch Unsettled Milk Entries to construct grouped pending settlements
       const { data: pendingMilkEntries, error: pendingMilkErr } = await supabase
@@ -329,6 +354,10 @@ function App() {
           .filter(s => !s.is_settled && s.seller_code === group.seller_code && s.owner_dairy === group.owner_dairy)
           .reduce((acc, curr) => acc + curr.total_amount, 0);
 
+        const groupAdvanceDeduction = unsettledAdvances
+          .filter(a => a.seller_id === group.seller_id && a.owner_id === group.owner_id)
+          .reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0);
+
         const sortedDates = group.dates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
         const startDate = sortedDates[0] || new Date().toISOString().split('T')[0];
         const endDate = sortedDates[sortedDates.length - 1] || new Date().toISOString().split('T')[0];
@@ -339,7 +368,8 @@ function App() {
           end_date: endDate,
           total_milk_amount: group.total_milk_amount,
           total_feed_deduction: groupFeedDeduction,
-          net_payable: Math.max(0, group.total_milk_amount - groupFeedDeduction),
+          total_advance_deduction: groupAdvanceDeduction,
+          net_payable: Math.max(0, group.total_milk_amount - groupFeedDeduction - groupAdvanceDeduction),
           status: 'pending',
           created_at: new Date().toISOString(),
           seller_name: group.seller_name,
@@ -359,7 +389,75 @@ function App() {
 
       if (milkErr) throw milkErr;
 
-      // H. Calculate aggregate totals for KPI stats
+      // H. Fetch Leads / Contact Requests (NEVER modified or altered)
+      const { data: leadsData, error: leadsErr } = await supabase
+        .from('contact_requests')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (leadsErr) throw leadsErr;
+      const formattedLeads: ContactRequest[] = (leadsData as any) || [];
+      setLeads(formattedLeads);
+
+      // I. Fetch Subscription Requests & Payments (with fallback resilience)
+      let formattedSubRequests: SubscriptionRequestRecord[] = [];
+      try {
+        const { data: subReqsData, error: subReqsErr } = await supabase
+          .from('subscription_requests')
+          .select('*, owner:users!subscription_requests_user_id_fkey(full_name, dairy_name, phone_number)')
+          .order('created_at', { ascending: false });
+        
+        if (!subReqsErr && subReqsData) {
+          formattedSubRequests = subReqsData.map((r: any) => ({
+            id: r.id,
+            user_id: r.user_id,
+            plan_type: r.plan_type,
+            amount: Number(r.amount) || 0,
+            payment_reference: r.payment_reference || '',
+            status: r.status || 'pending',
+            notes: r.notes || '',
+            created_at: r.created_at,
+            owner_name: r.user_name || r.owner?.full_name || 'Central Owner',
+            owner_dairy: r.dairy_name || r.owner?.dairy_name || 'Central Dairy',
+            owner_phone: r.user_phone || r.owner?.phone_number || '',
+            owner_email: r.user_email || ''
+          }));
+        }
+      } catch (subErr) {
+        console.warn('Subscription requests table not yet active:', subErr);
+      }
+      setSubscriptionRequests(formattedSubRequests);
+
+      let formattedSubPayments: SubscriptionPaymentRecord[] = [];
+      try {
+        const { data: subPaysData, error: subPaysErr } = await supabase
+          .from('subscription_payments')
+          .select('*, owner:users!subscription_payments_user_id_fkey(full_name, dairy_name)')
+          .order('created_at', { ascending: false });
+
+        if (!subPaysErr && subPaysData) {
+          formattedSubPayments = subPaysData.map((p: any) => ({
+            id: p.id,
+            user_id: p.user_id,
+            plan_type: p.plan_type,
+            amount: Number(p.amount) || 0,
+            currency: p.currency || 'INR',
+            razorpay_payment_id: p.razorpay_payment_id || null,
+            status: p.status || 'captured',
+            starts_at: p.starts_at || p.created_at,
+            expires_at: p.expires_at || p.created_at,
+            source: p.source || 'razorpay',
+            created_at: p.created_at,
+            owner_name: p.owner?.full_name || 'Central Owner',
+            owner_dairy: p.owner?.dairy_name || 'Central Dairy'
+          }));
+        }
+      } catch (payErr) {
+        console.warn('Subscription payments table not yet active:', payErr);
+      }
+      setSubscriptionPayments(formattedSubPayments);
+
+      // J. Calculate aggregate totals for KPI stats
       const totalLiters = (milkEntries || []).reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0);
       const totalMilkValueSum = (milkEntries || []).reduce((acc, curr) => acc + (Number(curr.total_amount) || 0), 0);
       
@@ -372,6 +470,9 @@ function App() {
       const totalFeedBagsCount = formattedFeedSales.reduce((acc, curr) => acc + curr.quantity, 0);
       const totalFeedAmountSum = formattedFeedSales.reduce((acc, curr) => acc + curr.total_amount, 0);
       const pendingFeedDeductionsVal = formattedFeedSales.filter(s => !s.is_settled).reduce((acc, curr) => acc + curr.total_amount, 0);
+      
+      const pendingLeadsVal = formattedLeads.filter(l => l.status === 'pending').length;
+      const pendingSubRequestsVal = formattedSubRequests.filter(r => r.status === 'pending').length;
 
       setStats({
         totalOwners: formattedOwners.length,
@@ -384,10 +485,12 @@ function App() {
         activeSubscriptions: activeSubsCount,
         totalFeedBags: totalFeedBagsCount,
         totalFeedAmount: totalFeedAmountSum,
-        pendingFeedDeductions: pendingFeedDeductionsVal
+        pendingFeedDeductions: pendingFeedDeductionsVal,
+        pendingLeads: pendingLeadsVal,
+        pendingSubscriptionRequests: pendingSubRequestsVal,
       });
 
-      // I. Construct Chart Trends (group by date)
+      // K. Construct Chart Trends (group by date)
       const milkByDate: { [key: string]: number } = {};
       (milkEntries || []).forEach(entry => {
         const dateStr = new Date(entry.collection_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -397,7 +500,7 @@ function App() {
       const milkChart = Object.keys(milkByDate).map(key => ({
         date: key,
         quantity: milkByDate[key]
-      })).slice(-10); // last 10 entries
+      })).slice(-10);
 
       const settlementByDate: { [key: string]: number } = {};
       formattedSettlements.forEach(setl => {
@@ -464,9 +567,7 @@ function App() {
 
       if (error) throw error;
       
-      // Update local state
       setOwners(prev => prev.map(o => o.id === ownerId ? { ...o, is_approved: !currentStatus } : o));
-      // Re-trigger global refresh
       loadAllData();
     } catch (err) {
       console.error(err);
@@ -474,28 +575,147 @@ function App() {
     }
   };
 
-  const handleUpdateSubscription = async (ownerId: string, status: string, expiresAt: string | null) => {
+  const handleUpdateSubscription = async (ownerId: string, status: string, expiresAt: string | null, planType?: string) => {
     try {
+      const updatePayload: any = { 
+        subscription_status: status,
+        subscription_expires_at: expiresAt
+      };
+      if (planType) {
+        updatePayload.subscription_plan = planType;
+      }
+      if (status === 'active') {
+        updatePayload.is_approved = true;
+      }
+
       const { error } = await supabase
         .from('users')
-        .update({ 
-          subscription_status: status,
-          subscription_expires_at: expiresAt
-        })
+        .update(updatePayload)
         .eq('id', ownerId);
 
       if (error) throw error;
 
-      // Update local state
       setOwners(prev => prev.map(o => o.id === ownerId ? { 
         ...o, 
         subscription_status: status, 
-        subscription_expires_at: expiresAt 
+        subscription_expires_at: expiresAt,
+        ...(planType ? { subscription_plan: planType } : {}),
+        ...(status === 'active' ? { is_approved: true } : {})
       } : o));
       loadAllData();
     } catch (err) {
       console.error(err);
       alert('Failed to update subscription parameters');
+    }
+  };
+
+  const handleApproveSubscriptionRequest = async (request: SubscriptionRequestRecord) => {
+    try {
+      const daysToAdd = request.plan_type === 'annual' ? 365 : request.plan_type === 'half_yearly' ? 180 : 30;
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() + daysToAdd);
+
+      // 1. Activate owner account and subscription in users table
+      const { error: userError } = await supabase
+        .from('users')
+        .update({
+          subscription_status: 'active',
+          subscription_plan: request.plan_type,
+          subscription_expires_at: expiryDate.toISOString(),
+          is_approved: true
+        })
+        .eq('id', request.user_id);
+
+      if (userError) throw userError;
+
+      // 2. Mark subscription request as approved
+      const { error: reqError } = await supabase
+        .from('subscription_requests')
+        .update({ status: 'approved' })
+        .eq('id', request.id);
+
+      if (reqError) console.warn('Could not update request record:', reqError);
+
+      // 3. Log into subscription_payments ledger
+      try {
+        await supabase
+          .from('subscription_payments')
+          .insert({
+            user_id: request.user_id,
+            plan_type: request.plan_type,
+            amount: request.amount,
+            currency: 'INR',
+            razorpay_payment_id: request.payment_reference || null,
+            status: 'captured',
+            starts_at: new Date().toISOString(),
+            expires_at: expiryDate.toISOString(),
+            source: 'admin_manual_approval'
+          });
+      } catch (payInsertErr) {
+        console.warn('Could not insert payment audit row:', payInsertErr);
+      }
+
+      alert(`Subscription verified & activated for ${request.owner_name} until ${expiryDate.toLocaleDateString()}`);
+      loadAllData();
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to approve subscription: ' + (err.message || err));
+    }
+  };
+
+  const handleRejectSubscriptionRequest = async (requestId: string) => {
+    try {
+      const { error } = await supabase
+        .from('subscription_requests')
+        .update({ status: 'rejected' })
+        .eq('id', requestId);
+
+      if (error) throw error;
+      alert('Subscription request rejected.');
+      loadAllData();
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to reject subscription: ' + (err.message || err));
+    }
+  };
+
+  const handleApproveLead = async (lead: ContactRequest) => {
+    try {
+      if (lead.user_id) {
+        const { error: userError } = await supabase
+          .from('users')
+          .update({ is_approved: true })
+          .eq('id', lead.user_id);
+        if (userError) throw userError;
+      }
+
+      const { error: leadError } = await supabase
+        .from('contact_requests')
+        .update({ status: 'approved' })
+        .eq('id', lead.id);
+      if (leadError) throw leadError;
+
+      alert(`Activated owner access for ${lead.name} successfully.`);
+      loadAllData();
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to approve lead: ' + (err.message || err));
+    }
+  };
+
+  const handleRejectLead = async (leadId: string) => {
+    try {
+      const { error } = await supabase
+        .from('contact_requests')
+        .update({ status: 'rejected' })
+        .eq('id', leadId);
+      if (error) throw error;
+
+      alert('Lead request marked rejected.');
+      loadAllData();
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to reject lead: ' + (err.message || err));
     }
   };
 
@@ -657,6 +877,18 @@ function App() {
                 icon: Users,
                 badge: stats.pendingOwners > 0 ? stats.pendingOwners : null
               },
+              {
+                id: 'subscriptions',
+                label: 'Subscriptions',
+                icon: CreditCard,
+                badge: stats.pendingSubscriptionRequests > 0 ? stats.pendingSubscriptionRequests : null
+              },
+              {
+                id: 'leads',
+                label: 'Contact Leads',
+                icon: Mail,
+                badge: stats.pendingLeads > 0 ? stats.pendingLeads : null
+              },
               { id: 'sellers', label: 'Suppliers', icon: UserCheck },
               { id: 'settlements', label: 'Settlements', icon: Receipt },
               { id: 'feed', label: 'Cattle Feed', icon: Box },
@@ -733,6 +965,21 @@ function App() {
             owners={owners} 
             onToggleApproval={handleToggleApproval} 
             onUpdateSubscription={handleUpdateSubscription} 
+          />
+        )}
+        {activeTab === 'subscriptions' && (
+          <SubscriptionsView
+            requests={subscriptionRequests}
+            payments={subscriptionPayments}
+            onApproveRequest={handleApproveSubscriptionRequest}
+            onRejectRequest={handleRejectSubscriptionRequest}
+          />
+        )}
+        {activeTab === 'leads' && (
+          <LeadsView 
+            leads={leads} 
+            onApproveLead={handleApproveLead} 
+            onRejectLead={handleRejectLead} 
           />
         )}
         {activeTab === 'sellers' && (
